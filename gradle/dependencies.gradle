@@ -59,7 +59,6 @@ versions += [
   commonsNet: "3.13.0",
   classgraph: "4.8.196",
   gradle: "9.8.2",
-  httpclient: "4.5.14",
   jackson: "2.22.4",
   jacksonAnnotations: "2.22",
   jacoco: "0.8.15",
@@ -236,7 +235,6 @@ libs += [
   jfreechart: "org.jfree:jfreechart:$versions.jfreechart",
   mavenArtifact: "org.apache.maven:maven-artifact:$versions.mavenArtifact",
   zstd: "com.github.luben:zstd-jni:$versions.zstd",
-  httpclient: "org.apache.httpcomponents:httpclient:$versions.httpclient",
   hdrHistogram: "org.hdrhistogram:HdrHistogram:$versions.hdrHistogram",
   hash4j: "com.dynatrace.hash4j:hash4j:$versions.hash4j",
 ]

@@ -596,7 +596,6 @@
         <allow pkg="jakarta.servlet" />
         <allow pkg="org.glassfish.jersey" />
         <allow pkg="com.fasterxml.jackson" />
-        <allow pkg="org.apache.http"/>
         <allow pkg="io.swagger.v3.oas.annotations"/>
       </subpackage>
 
@@ -649,7 +648,8 @@
       <allow pkg="org.apache.kafka.connect.util.clusters" />
       <allow pkg="org.apache.kafka.connect" />
       <allow pkg="jakarta.ws.rs" />
-      <allow pkg="org.apache.http"/>
+      <allow pkg="org.eclipse.jetty.client"/>
+      <allow pkg="org.eclipse.jetty.io"/>
       <allow pkg="org.eclipse.jetty.util"/>
       <!-- for tests -->
       <allow pkg="org.apache.kafka.raft" />

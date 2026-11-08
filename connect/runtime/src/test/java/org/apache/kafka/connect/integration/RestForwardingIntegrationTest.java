@@ -37,14 +37,11 @@ import org.apache.kafka.connect.util.Callback;
 import org.apache.kafka.test.TestSslUtils;
 import org.apache.kafka.test.TestUtils;
 
-import org.apache.http.HttpHost;
-import org.apache.http.HttpRequest;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
+import org.eclipse.jetty.client.ContentResponse;
+import org.eclipse.jetty.client.HttpClient;
+import org.eclipse.jetty.client.StringRequestContent;
+import org.eclipse.jetty.client.transport.HttpClientTransportDynamic;
+import org.eclipse.jetty.io.ClientConnector;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -61,14 +58,10 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-
-import javax.net.ssl.SSLContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -94,29 +87,22 @@ public class RestForwardingIntegrationTest {
     @Mock
     private Herder leaderHerder;
 
-    private SslContextFactory.Client factory;
-    private CloseableHttpClient httpClient;
-    private Collection<CloseableHttpResponse> responses;
+    private HttpClient httpClient;
 
     @BeforeEach
     public void setUp() throws IOException, GeneralSecurityException {
         sslConfig = TestSslUtils.createSslConfig(false, true, ConnectionMode.SERVER, TestUtils.tempFile(), "testCert");
-        responses = new ArrayList<>();
     }
 
     @AfterEach
     public void tearDown() throws IOException {
-        for (CloseableHttpResponse response: responses) {
-            response.close();
-        }
         AtomicReference<Throwable> firstException = new AtomicReference<>();
         Utils.closeAllQuietly(
                 firstException,
                 "clientsAndServers",
-                httpClient,
+                httpClient != null ? httpClient::stop : null,
                 followerServer != null ? followerServer::stop : null,
-                leaderServer != null ? leaderServer::stop : null,
-                factory != null ? factory::stop : null
+                leaderServer != null ? leaderServer::stop : null
         );
         if (firstException.get() != null) {
             throw new RuntimeException("Unable to cleanly close resources", firstException.get());
@@ -180,12 +166,12 @@ public class RestForwardingIntegrationTest {
         leaderServer.initializeResources(leaderHerder);
 
         // External client setup
-        factory = SSLUtils.createClientSideSslContextFactory(followerConfig);
-        factory.start();
-        SSLContext ssl = factory.getSslContext();
-        httpClient = HttpClients.custom()
-                .setSSLContext(ssl)
-                .build();
+        SslContextFactory.Client factory = SSLUtils.createClientSideSslContextFactory(followerConfig);
+        ClientConnector clientConnector = new ClientConnector();
+        clientConnector.setSslContextFactory(factory);
+        httpClient = new HttpClient(new HttpClientTransportDynamic(clientConnector));
+        httpClient.setFollowRedirects(false);
+        httpClient.start();
 
         // Follower will forward to the leader
         URI leaderUrl = leaderServer.advertisedUrl();
@@ -209,18 +195,16 @@ public class RestForwardingIntegrationTest {
 
         // Client makes request to the follower
         URI followerUrl = followerServer.advertisedUrl();
-        HttpPost request = new HttpPost("/connectors");
         String jsonBody = "{" +
                 "\"name\": \"blah\"," +
                 "\"config\": {}" +
                 "}";
-        StringEntity entity = new StringEntity(jsonBody, StandardCharsets.UTF_8);
-        entity.setContentType("application/json");
-        request.setEntity(entity);
-        HttpResponse httpResponse = executeRequest(followerUrl, request);
+        ContentResponse httpResponse = httpClient.POST(followerUrl.resolve("/connectors"))
+                .body(new StringRequestContent("application/json", jsonBody, StandardCharsets.UTF_8))
+                .send();
 
         // And sees the success from the leader
-        assertEquals(201, httpResponse.getStatusLine().getStatusCode());
+        assertEquals(201, httpResponse.getStatus());
     }
 
     private Map<String, String> baseWorkerProps(boolean dualListener, boolean advertiseSSL) {
@@ -254,12 +238,5 @@ public class RestForwardingIntegrationTest {
         }
 
         return workerProps;
-    }
-
-    private HttpResponse executeRequest(URI serverUrl, HttpRequest request) throws IOException {
-        HttpHost httpHost = new HttpHost(serverUrl.getHost(), serverUrl.getPort(), serverUrl.getScheme());
-        CloseableHttpResponse response = httpClient.execute(httpHost, request);
-        responses.add(response);
-        return response;
     }
 }

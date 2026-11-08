@@ -34,17 +34,11 @@ import org.apache.kafka.connect.runtime.rest.entities.LoggerLevel;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import org.apache.http.HttpHost;
-import org.apache.http.HttpRequest;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpOptions;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.BasicResponseHandler;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
+import org.eclipse.jetty.client.ContentResponse;
+import org.eclipse.jetty.client.HttpClient;
+import org.eclipse.jetty.client.Request;
+import org.eclipse.jetty.client.StringRequestContent;
+import org.eclipse.jetty.http.HttpHeader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,21 +49,18 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import jakarta.ws.rs.container.ContainerResponseFilter;
 import jakarta.ws.rs.core.MediaType;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -89,24 +80,22 @@ public class ConnectRestServerTest {
     @Mock private Herder herder;
     @Mock private Plugins plugins;
     private ConnectRestServer server;
-    private CloseableHttpClient httpClient;
-    private final Collection<CloseableHttpResponse> responses = new ArrayList<>();
+    private HttpClient httpClient;
 
     protected static final String KAFKA_CLUSTER_ID = "Xbafgnagvar";
 
     @BeforeEach
-    public void setUp() {
-        httpClient = HttpClients.createMinimal();
+    public void setUp() throws Exception {
+        httpClient = new HttpClient();
+        httpClient.setFollowRedirects(false);
+        httpClient.start();
         doReturn(new MockConnectMetrics()).when(herder).connectMetrics();
     }
 
     @AfterEach
-    public void tearDown() throws IOException {
-        for (CloseableHttpResponse response: responses) {
-            response.close();
-        }
+    public void tearDown() throws Exception {
         if (httpClient != null) {
-            httpClient.close();
+            httpClient.stop();
         }
         if (server != null) {
             server.stop();
@@ -120,12 +109,12 @@ public class ConnectRestServerTest {
     }
 
     @Test
-    public void testCORSEnabled() throws IOException {
+    public void testCORSEnabled() throws Exception {
         checkCORSRequest("*", "http://bar.com", "http://bar.com", "PUT");
     }
 
     @Test
-    public void testCORSDisabled() throws IOException {
+    public void testCORSDisabled() throws Exception {
         checkCORSRequest("", "http://bar.com", null, null);
     }
 
@@ -181,7 +170,7 @@ public class ConnectRestServerTest {
     }
 
     @Test
-    public void testOptionsDoesNotIncludeWadlOutput() throws IOException {
+    public void testOptionsDoesNotIncludeWadlOutput() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
 
         doReturn(KAFKA_CLUSTER_ID).when(herder).kafkaClusterId();
@@ -192,20 +181,18 @@ public class ConnectRestServerTest {
         server.initializeServer();
         server.initializeResources(herder);
 
-        HttpOptions request = new HttpOptions("/connectors");
-        request.addHeader("Content-Type", MediaType.WILDCARD);
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
-        assertEquals(MediaType.TEXT_PLAIN, response.getEntity().getContentType().getValue());
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        response.getEntity().writeTo(baos);
-        assertArrayEquals(
-            request.getAllowedMethods(response).toArray(),
-            baos.toString(StandardCharsets.UTF_8).split(", ")
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/connectors")).method("OPTIONS");
+        request.headers(headers -> headers.add(HttpHeader.CONTENT_TYPE, MediaType.WILDCARD));
+        ContentResponse response = request.send();
+        assertEquals(MediaType.TEXT_PLAIN, response.getHeaders().get(HttpHeader.CONTENT_TYPE));
+        assertEquals(
+            Set.copyOf(response.getHeaders().getCSV(HttpHeader.ALLOW, false)),
+            Set.of(response.getContentAsString().split(", "))
         );
     }
 
     public void checkCORSRequest(String corsDomain, String origin, String expectedHeader, String method)
-        throws IOException {
+        throws Exception {
         Map<String, String> configMap = baseServerProps();
         configMap.put(RestServerConfig.ACCESS_CONTROL_ALLOW_ORIGIN_CONFIG, corsDomain);
         configMap.put(RestServerConfig.ACCESS_CONTROL_ALLOW_METHODS_CONFIG, method);
@@ -220,36 +207,36 @@ public class ConnectRestServerTest {
         server.initializeResources(herder);
         URI serverUrl = server.advertisedUrl();
 
-        HttpRequest request = new HttpGet("/connectors");
-        request.addHeader("Referer", origin + "/page");
-        request.addHeader("Origin", origin);
-        HttpResponse response = executeRequest(serverUrl, request);
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/connectors"));
+        request.headers(headers -> headers.add("Referer", origin + "/page"));
+        request.headers(headers -> headers.add("Origin", origin));
+        ContentResponse response = request.send();
 
-        assertEquals(200, response.getStatusLine().getStatusCode());
+        assertEquals(200, response.getStatus());
 
         if (expectedHeader != null) {
             assertEquals(expectedHeader,
-                response.getFirstHeader("Access-Control-Allow-Origin").getValue());
+                response.getHeaders().get("Access-Control-Allow-Origin"));
         }
 
-        request = new HttpOptions("/connector-plugins/FileStreamSource/validate");
-        request.addHeader("Referer", origin + "/page");
-        request.addHeader("Origin", origin);
-        request.addHeader("Access-Control-Request-Method", method);
-        response = executeRequest(serverUrl, request);
-        assertEquals(404, response.getStatusLine().getStatusCode());
+        request = httpClient.newRequest(serverUrl.resolve("/connector-plugins/FileStreamSource/validate")).method("OPTIONS");
+        request.headers(headers -> headers.add("Referer", origin + "/page"));
+        request.headers(headers -> headers.add("Origin", origin));
+        request.headers(headers -> headers.add("Access-Control-Request-Method", method));
+        response = request.send();
+        assertEquals(404, response.getStatus());
         if (expectedHeader != null) {
             assertEquals(expectedHeader,
-                response.getFirstHeader("Access-Control-Allow-Origin").getValue());
+                response.getHeaders().get("Access-Control-Allow-Origin"));
         }
         if (method != null) {
             assertEquals(method,
-                response.getFirstHeader("Access-Control-Allow-Methods").getValue());
+                response.getHeaders().get("Access-Control-Allow-Methods"));
         }
     }
 
     @Test
-    public void testStandaloneConfig() throws IOException  {
+    public void testStandaloneConfig() throws Exception  {
         Map<String, String> configMap = baseServerProps();
         configMap.put("offset.storage.file.filename", "/tmp");
 
@@ -261,14 +248,14 @@ public class ConnectRestServerTest {
         server = new ConnectRestServer(null, restClient, configMap);
         server.initializeServer();
         server.initializeResources(herder);
-        HttpRequest request = new HttpGet("/connectors");
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/connectors"));
+        ContentResponse response = request.send();
 
-        assertEquals(200, response.getStatusLine().getStatusCode());
+        assertEquals(200, response.getStatus());
     }
 
     @Test
-    public void testLoggerEndpointWithDefaults() throws IOException {
+    public void testLoggerEndpointWithDefaults() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
 
         final String logger = "a.b.c.s.W";
@@ -302,7 +289,7 @@ public class ConnectRestServerTest {
     }
 
     @Test
-    public void testIndependentAdminEndpoint() throws IOException {
+    public void testIndependentAdminEndpoint() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
         configMap.put(RestServerConfig.ADMIN_LISTENERS_CONFIG, "http://localhost:0");
 
@@ -324,13 +311,13 @@ public class ConnectRestServerTest {
 
         executeGet(server.adminUrl(), "/admin/loggers");
 
-        HttpRequest request = new HttpGet("/admin/loggers");
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
-        assertEquals(404, response.getStatusLine().getStatusCode());
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/admin/loggers"));
+        ContentResponse response = request.send();
+        assertEquals(404, response.getStatus());
     }
 
     @Test
-    public void testRestExtensionsRegisteredWithAdminListener() throws IOException {
+    public void testRestExtensionsRegisteredWithAdminListener() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
         configMap.put(RestServerConfig.ADMIN_LISTENERS_CONFIG, "http://localhost:0");
         configMap.put(RestServerConfig.REST_EXTENSION_CLASSES_CONFIG, HeaderConnectRestExtension.class.getName());
@@ -348,17 +335,17 @@ public class ConnectRestServerTest {
         assertNotEquals(server.advertisedUrl(), server.adminUrl());
         assertEquals(2, extension.registrations);
 
-        HttpResponse regularResponse = executeRequest(server.advertisedUrl(), new HttpGet("/connectors"));
-        assertEquals(200, regularResponse.getStatusLine().getStatusCode());
-        assertNotNull(regularResponse.getFirstHeader(extension.name));
+        ContentResponse regularResponse = httpClient.GET(server.advertisedUrl().resolve("/connectors"));
+        assertEquals(200, regularResponse.getStatus());
+        assertNotNull(regularResponse.getHeaders().get(extension.name));
 
-        HttpResponse adminResponse = executeRequest(server.adminUrl(), new HttpGet("/admin/loggers"));
-        assertEquals(200, adminResponse.getStatusLine().getStatusCode());
-        assertNotNull(adminResponse.getFirstHeader(extension.name));
+        ContentResponse adminResponse = httpClient.GET(server.adminUrl().resolve("/admin/loggers"));
+        assertEquals(200, adminResponse.getStatus());
+        assertNotNull(adminResponse.getHeaders().get(extension.name));
     }
 
     @Test
-    public void testRestExtensionsWithoutAdminListener() throws IOException {
+    public void testRestExtensionsWithoutAdminListener() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
         configMap.put(RestServerConfig.REST_EXTENSION_CLASSES_CONFIG, HeaderConnectRestExtension.class.getName());
 
@@ -374,13 +361,13 @@ public class ConnectRestServerTest {
 
         assertEquals(1, extension.registrations);
 
-        HttpResponse response = executeRequest(server.advertisedUrl(), new HttpGet("/connectors"));
-        assertEquals(200, response.getStatusLine().getStatusCode());
-        assertNotNull(response.getFirstHeader(extension.name));
+        ContentResponse response = httpClient.GET(server.advertisedUrl().resolve("/connectors"));
+        assertEquals(200, response.getStatus());
+        assertNotNull(response.getHeaders().get(extension.name));
     }
 
     @Test
-    public void testRestExtensionsWithDisabledAdminListener() throws IOException {
+    public void testRestExtensionsWithDisabledAdminListener() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
         configMap.put(RestServerConfig.ADMIN_LISTENERS_CONFIG, "");
         configMap.put(RestServerConfig.REST_EXTENSION_CLASSES_CONFIG, HeaderConnectRestExtension.class.getName());
@@ -398,13 +385,13 @@ public class ConnectRestServerTest {
         assertEquals(1, extension.registrations);
 
         // Extensions should still work on the regular listener
-        HttpResponse response = executeRequest(server.advertisedUrl(), new HttpGet("/connectors"));
-        assertEquals(200, response.getStatusLine().getStatusCode());
-        assertNotNull(response.getFirstHeader(extension.name));
+        ContentResponse response = httpClient.GET(server.advertisedUrl().resolve("/connectors"));
+        assertEquals(200, response.getStatus());
+        assertNotNull(response.getHeaders().get(extension.name));
     }
 
     @Test
-    public void testDisableAdminEndpoint() throws IOException {
+    public void testDisableAdminEndpoint() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
         configMap.put(RestServerConfig.ADMIN_LISTENERS_CONFIG, "");
 
@@ -418,13 +405,13 @@ public class ConnectRestServerTest {
 
         assertNull(server.adminUrl());
 
-        HttpRequest request = new HttpGet("/admin/loggers");
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
-        assertEquals(404, response.getStatusLine().getStatusCode());
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/admin/loggers"));
+        ContentResponse response = request.send();
+        assertEquals(404, response.getStatus());
     }
 
     @Test
-    public void testRequestLogs() throws IOException {
+    public void testRequestLogs() throws Exception {
         Map<String, String> configMap = new HashMap<>(baseServerProps());
 
         doReturn(KAFKA_CLUSTER_ID).when(herder).kafkaClusterId();
@@ -436,20 +423,20 @@ public class ConnectRestServerTest {
         server.initializeResources(herder);
 
         LogCaptureAppender restServerAppender = LogCaptureAppender.createAndRegister();
-        HttpRequest request = new HttpGet("/");
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/"));
+        ContentResponse response = request.send();
 
         // Stop the server to flush all logs
         server.stop();
 
         Collection<String> logMessages = restServerAppender.getMessages();
         restServerAppender.close();
-        String expectedlogContent = "\"GET / HTTP/1.1\" " + response.getStatusLine().getStatusCode();
+        String expectedlogContent = "\"GET / HTTP/1.1\" " + response.getStatus();
         assertTrue(logMessages.stream().anyMatch(logMessage -> logMessage.contains(expectedlogContent)));
     }
 
     @Test
-    public void testValidCustomizedHttpResponseHeaders() throws IOException  {
+    public void testValidCustomizedHttpResponseHeaders() throws Exception  {
         String headerConfig =
                 "add X-XSS-Protection: 1; mode=block, \"add Cache-Control: no-cache, no-store, must-revalidate\"";
         Map<String, String> expectedHeaders = new HashMap<>();
@@ -459,7 +446,7 @@ public class ConnectRestServerTest {
     }
 
     @Test
-    public void testDefaultCustomizedHttpResponseHeaders() throws IOException  {
+    public void testDefaultCustomizedHttpResponseHeaders() throws Exception  {
         String headerConfig = "";
         Map<String, String> expectedHeaders = new HashMap<>();
         checkCustomizedHttpResponseHeaders(headerConfig, expectedHeaders);
@@ -518,7 +505,7 @@ public class ConnectRestServerTest {
     }
 
     private void checkCustomizedHttpResponseHeaders(String headerConfig, Map<String, String> expectedHeaders)
-            throws IOException  {
+            throws Exception  {
         Map<String, String> configMap = baseServerProps();
         configMap.put("offset.storage.file.filename", "/tmp");
         configMap.put(RestServerConfig.RESPONSE_HTTP_HEADERS_CONFIG, headerConfig);
@@ -531,41 +518,32 @@ public class ConnectRestServerTest {
         server = new ConnectRestServer(null, restClient, configMap);
         server.initializeServer();
         server.initializeResources(herder);
-        HttpRequest request = new HttpGet("/connectors");
-        HttpResponse response = executeRequest(server.advertisedUrl(), request);
-        assertEquals(200, response.getStatusLine().getStatusCode());
+        Request request = httpClient.newRequest(server.advertisedUrl().resolve("/connectors"));
+        ContentResponse response = request.send();
+        assertEquals(200, response.getStatus());
         if (!headerConfig.isEmpty()) {
             expectedHeaders.forEach((k, v) ->
-                    assertEquals(response.getFirstHeader(k).getValue(), v));
+                    assertEquals(response.getHeaders().get(k), v));
         } else {
-            assertNull(response.getFirstHeader("X-Frame-Options"));
+            assertNull(response.getHeaders().get("X-Frame-Options"));
         }
     }
 
-    private String executeGet(URI serverUrl, String endpoint) throws IOException {
-        HttpRequest request = new HttpGet(endpoint);
-        HttpResponse response = executeRequest(serverUrl, request);
+    private String executeGet(URI serverUrl, String endpoint) throws Exception {
+        ContentResponse response = httpClient.GET(serverUrl.resolve(endpoint));
 
-        assertEquals(200, response.getStatusLine().getStatusCode());
-        return new BasicResponseHandler().handleResponse(response);
+        assertEquals(200, response.getStatus());
+        return response.getContentAsString();
     }
 
-    private String executePut(URI serverUrl, String endpoint, String jsonBody) throws IOException {
-        HttpPut request = new HttpPut(endpoint);
-        StringEntity entity = new StringEntity(jsonBody, StandardCharsets.UTF_8);
-        entity.setContentType("application/json");
-        request.setEntity(entity);
-        HttpResponse response = executeRequest(serverUrl, request);
+    private String executePut(URI serverUrl, String endpoint, String jsonBody) throws Exception {
+        ContentResponse response = httpClient.newRequest(serverUrl.resolve(endpoint))
+                .method("PUT")
+                .body(new StringRequestContent("application/json", jsonBody, StandardCharsets.UTF_8))
+                .send();
 
-        assertEquals(200, response.getStatusLine().getStatusCode());
-        return new BasicResponseHandler().handleResponse(response);
-    }
-
-    private HttpResponse executeRequest(URI serverUrl, HttpRequest request) throws IOException {
-        HttpHost httpHost = new HttpHost(serverUrl.getHost(), serverUrl.getPort());
-        CloseableHttpResponse response = httpClient.execute(httpHost, request);
-        responses.add(response);
-        return response;
+        assertEquals(200, response.getStatus());
+        return response.getContentAsString();
     }
 
     private void expectEmptyRestExtensions() {
